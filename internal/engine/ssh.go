@@ -39,12 +39,18 @@ func parseKey(path string) (ssh.AuthMethod, error) {
 }
 
 func agentAuth() ssh.AuthMethod {
-	if sock, ok := os.LookupEnv("SSH_AUTH_SOCK"); ok {
-		if conn, err := net.Dial("unix", sock); err == nil {
-			return ssh.PublicKeysCallback(agent.NewClient(conn).Signers)
-		}
+	sock, ok := os.LookupEnv("SSH_AUTH_SOCK")
+	if !ok {
+		return nil
 	}
-	return nil
+	log.Printf("DEBUG: Found SSH_AUTH_SOCK: %s, attempting to connect...", sock)
+	conn, err := net.DialTimeout("unix", sock, 2*time.Second)
+	if err != nil {
+		log.Printf("Warning: SSH_AUTH_SOCK set but failed to connect (timeout 2s): %v", err)
+		return nil
+	}
+	log.Printf("DEBUG: Successfully connected to SSH Agent.")
+	return ssh.PublicKeysCallback(agent.NewClient(conn).Signers)
 }
 
 func New(host, port, user, keyPath string) *Engine {
@@ -66,9 +72,11 @@ func (e *Engine) Connect() error {
 	}
 
 	var auths []ssh.AuthMethod
+	var tried []string
 
 	// 1. Try specified key path
 	if e.KeyPath != "" {
+		tried = append(tried, fmt.Sprintf("file:%s", e.KeyPath))
 		if auth, err := parseKey(e.KeyPath); err == nil {
 			auths = append(auths, auth)
 		} else {
@@ -84,6 +92,7 @@ func (e *Engine) Connect() error {
 			filepath.Join(home, ".ssh", "id_rsa"),
 		}
 		for _, d := range defaults {
+			tried = append(tried, fmt.Sprintf("default-file:%s", d))
 			if auth, err := parseKey(d); err == nil {
 				auths = append(auths, auth)
 				break
@@ -93,11 +102,12 @@ func (e *Engine) Connect() error {
 
 	// 3. Always include SSH Agent if available
 	if agent := agentAuth(); agent != nil {
+		tried = append(tried, "ssh-agent")
 		auths = append(auths, agent)
 	}
 
 	if len(auths) == 0 {
-		return fmt.Errorf("no valid SSH authentication methods found (tried key and agent)")
+		return fmt.Errorf("no valid SSH authentication methods found (tried: %v)", tried)
 	}
 
 	config := &ssh.ClientConfig{

@@ -43,6 +43,7 @@ func NewServer(mgr *tunnel.Manager) *Server {
 }
 
 func (s *Server) Start() error {
+	log.Printf("DEBUG: Cleaning up and listening on Unix socket: %s", SocketPath)
 	_ = os.Remove(SocketPath)
 	l, err := net.Listen("unix", SocketPath)
 	if err != nil {
