@@ -105,7 +105,7 @@ var addCmd = &cobra.Command{
 			HostName:   parts[0], // Assuming HostName = Alias for hot adds unless resolved
 			Port:       "22", // Default
 			User:       os.Getenv("USER"),
-			KeyPath:    os.Getenv("HOME") + "/.ssh/id_rsa",
+			KeyPath:    "", // Let engine handle defaults/agent
 			LocalPort:  localPort,
 			RemotePort: remotePort,
 		}

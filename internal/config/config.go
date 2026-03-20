@@ -86,10 +86,7 @@ func ResolveTunnels(cfg *ConfigFile) ([]ResolvedTunnel, error) {
 		}
 
 		keyPath, _ := sshCfg.Get(t.Server, "IdentityFile")
-		if keyPath == "" {
-			home, _ := os.UserHomeDir()
-			keyPath = filepath.Join(home, ".ssh", "id_rsa")
-		} else if strings.HasPrefix(keyPath, "~/") {
+		if strings.HasPrefix(keyPath, "~/") {
 			home, _ := os.UserHomeDir()
 			keyPath = filepath.Join(home, keyPath[2:])
 		}

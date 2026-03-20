@@ -5,10 +5,12 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 type Engine struct {
@@ -22,6 +24,9 @@ type Engine struct {
 }
 
 func parseKey(path string) (ssh.AuthMethod, error) {
+	if path == "" {
+		return nil, fmt.Errorf("empty key path")
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -31,6 +36,15 @@ func parseKey(path string) (ssh.AuthMethod, error) {
 		return nil, err
 	}
 	return ssh.PublicKeys(signer), nil
+}
+
+func agentAuth() ssh.AuthMethod {
+	if sock, ok := os.LookupEnv("SSH_AUTH_SOCK"); ok {
+		if conn, err := net.Dial("unix", sock); err == nil {
+			return ssh.PublicKeysCallback(agent.NewClient(conn).Signers)
+		}
+	}
+	return nil
 }
 
 func New(host, port, user, keyPath string) *Engine {
@@ -51,14 +65,44 @@ func (e *Engine) Connect() error {
 		return nil // Already connected
 	}
 
-	auth, err := parseKey(e.KeyPath)
-	if err != nil {
-		return fmt.Errorf("failed to parse SSH key (%s): %w", e.KeyPath, err)
+	var auths []ssh.AuthMethod
+
+	// 1. Try specified key path
+	if e.KeyPath != "" {
+		if auth, err := parseKey(e.KeyPath); err == nil {
+			auths = append(auths, auth)
+		} else {
+			log.Printf("Warning: failed to use key %s: %v", e.KeyPath, err)
+		}
+	}
+
+	// 2. Try default keys if no specific key was successful
+	if len(auths) == 0 {
+		home, _ := os.UserHomeDir()
+		defaults := []string{
+			filepath.Join(home, ".ssh", "id_ed25519"),
+			filepath.Join(home, ".ssh", "id_rsa"),
+		}
+		for _, d := range defaults {
+			if auth, err := parseKey(d); err == nil {
+				auths = append(auths, auth)
+				break
+			}
+		}
+	}
+
+	// 3. Always include SSH Agent if available
+	if agent := agentAuth(); agent != nil {
+		auths = append(auths, agent)
+	}
+
+	if len(auths) == 0 {
+		return fmt.Errorf("no valid SSH authentication methods found (tried key and agent)")
 	}
 
 	config := &ssh.ClientConfig{
 		User: e.User,
-		Auth: []ssh.AuthMethod{auth},
+		Auth: auths,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         10 * time.Second,
 	}
