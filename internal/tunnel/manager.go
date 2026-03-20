@@ -109,19 +109,24 @@ func (m *Manager) startTunnel(ctx context.Context, t *Tunnel) error {
 	t.Listener = listener
 
 	go func() {
+		// Close listener when context is cancelled
+		go func() {
+			<-ctx.Done()
+			listener.Close()
+		}()
+
 		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			listener.(*net.TCPListener).SetDeadline(time.Now().Add(time.Second))
 			conn, err := listener.Accept()
 			if err != nil {
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					// Log unexpected errors but keep listening
+					log.Printf("Accept error on %s: %v", localAddr, err)
+					time.Sleep(100 * time.Millisecond) // Avoid tight loop if persistent error
 					continue
 				}
-				continue
 			}
 			go m.handleConnection(ctx, t, conn)
 		}

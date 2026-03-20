@@ -3,9 +3,11 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gosh-tunnel/internal/config"
 	"gosh-tunnel/internal/tunnel"
@@ -44,7 +46,7 @@ func (s *Server) Start() error {
 	_ = os.Remove(SocketPath)
 	l, err := net.Listen("unix", SocketPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to listen on unix socket %s: %w", SocketPath, err)
 	}
 	s.listener = l
 
@@ -52,7 +54,11 @@ func (s *Server) Start() error {
 		for {
 			conn, err := s.listener.Accept()
 			if err != nil {
-				return
+				if strings.Contains(err.Error(), "use of closed network connection") {
+					return
+				}
+				log.Printf("IPC Server accept error: %v", err)
+				continue
 			}
 			go s.handleConnection(conn)
 		}

@@ -28,23 +28,42 @@ var startCmd = &cobra.Command{
 		cfgPath, _ := cmd.Flags().GetString("config")
 		log.Println("Starting Gosh-Tunnel Daemon...")
 
+		// If no config specified, try looking for config.yaml in current dir
+		if cfgPath == "" {
+			if _, err := os.Stat("config.yaml"); err == nil {
+				cfgPath = "config.yaml"
+				log.Printf("Using default configuration file: %s", cfgPath)
+			}
+		}
+
 		mgr := tunnel.NewManager()
 		srv := daemon.NewServer(mgr)
 		
 		if err := srv.Start(); err != nil {
-			log.Fatalf("Failed to start daemon: %v", err)
+			log.Fatalf("CRITICAL: Failed to start IPC daemon: %v", err)
 		}
 		defer srv.Stop()
+		log.Printf("IPC Server listening on: %s", daemon.SocketPath)
 
-		// Optional: Load initial config
+		// Load initial config
 		if cfgPath != "" {
-			if cfg, err := config.LoadConfig(cfgPath); err == nil {
-				if resolved, err := config.ResolveTunnels(cfg); err == nil {
+			cfg, err := config.LoadConfig(cfgPath)
+			if err != nil {
+				log.Printf("Error: Failed to load config %s: %v", cfgPath, err)
+			} else {
+				resolved, err := config.ResolveTunnels(cfg)
+				if err != nil {
+					log.Printf("Error: Failed to resolve tunnels from %s: %v", cfgPath, err)
+				} else {
 					for _, r := range resolved {
-						_ = mgr.Add(r)
+						if err := mgr.Add(r); err != nil {
+							log.Printf("Error adding tunnel %s: %v", r.Name, err)
+						}
 					}
 				}
 			}
+		} else {
+			log.Println("Note: No configuration file loaded. Daemon waiting for manual 'add' commands.")
 		}
 
 		sigs := make(chan os.Signal, 1)

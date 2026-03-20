@@ -3,6 +3,7 @@ package daemon_test
 import (
 	"fmt"
 	"math/rand"
+	"net"
 	"os"
 	"sync"
 	"testing"
@@ -134,5 +135,38 @@ func TestDaemonIPCFuzz(t *testing.T) {
 	_, err := cli.Status()
 	if err != nil {
 		t.Fatalf("Daemon seemingly crashed or hung after fuzzing: %v", err)
+	}
+}
+// TestDaemonIPCResilience ensures the server doesn't crash on invalid input or connection resets
+func TestDaemonIPCResilience(t *testing.T) {
+	mgr := tunnel.NewManager()
+	testSocket := fmt.Sprintf("/tmp/gosh-resilience-%d.sock", time.Now().UnixNano())
+	daemon.SocketPath = testSocket
+	defer os.Remove(testSocket)
+
+	srv := daemon.NewServer(mgr)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Failed to start daemon: %v", err)
+	}
+	defer srv.Stop()
+
+	// 1. Send garbage data
+	conn, err := net.Dial("unix", testSocket)
+	if err == nil {
+		fmt.Fprintf(conn, "GARBAGE-DATA-NOT-JSON")
+		conn.Close()
+	}
+
+	// 2. Immediate disconnect
+	conn, err = net.Dial("unix", testSocket)
+	if err == nil {
+		conn.Close()
+	}
+
+	// 3. Verify daemon still works
+	cli := daemon.NewClient()
+	_, err = cli.Status()
+	if err != nil {
+		t.Errorf("Daemon should have survived garbage data, but got error: %v", err)
 	}
 }
