@@ -61,6 +61,7 @@ func (s *Server) Start() error {
 				log.Printf("IPC Server accept error: %v", err)
 				continue
 			}
+			log.Printf("DEBUG: IPC Server accepted connection from %s", conn.RemoteAddr())
 			go s.handleConnection(conn)
 		}
 	}()
@@ -69,6 +70,7 @@ func (s *Server) Start() error {
 
 func (s *Server) Stop() {
 	if s.listener != nil {
+		log.Printf("DEBUG: Stopping IPC Server and removing socket: %s", SocketPath)
 		s.listener.Close()
 	}
 	os.Remove(SocketPath)
@@ -76,6 +78,7 @@ func (s *Server) Stop() {
 
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
+	log.Printf("DEBUG: Handling IPC request from %s", conn.RemoteAddr())
 
 	var req Request
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {

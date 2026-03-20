@@ -29,6 +29,9 @@ var startCmd = &cobra.Command{
 		cfgPath, _ := cmd.Flags().GetString("config")
 		log.Println("Starting Gosh-Tunnel Daemon...")
 
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
 		// If no config specified, try looking for config.yaml in current dir
 		if cfgPath == "" {
 			log.Println("DEBUG: No config path specified, searching for default config.yaml...")
@@ -80,11 +83,8 @@ var startCmd = &cobra.Command{
 		}
 
 		log.Println("Daemon is fully initialized and operational. Press Ctrl+C to stop.")
-
-		sigs := make(chan os.Signal, 1)
-		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-		<-sigs
-		log.Println("Shutting down daemon...")
+		s := <-sigs
+		log.Printf("DEBUG: Signal received: %v. Shutting down daemon...", s)
 	},
 }
 
