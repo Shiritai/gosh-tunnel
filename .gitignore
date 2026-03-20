@@ -1,0 +1,6 @@
+/gosh
+/gosh-tunnel
+*.log
+.DS_Store
+.idea/
+.vscode/
