@@ -110,3 +110,35 @@ Host lab-server
 		t.Errorf("port parse mismatch, got %d:%d", resolved[0].LocalPort, resolved[0].RemotePort)
 	}
 }
+func TestConfigPersistence(t *testing.T) {
+	cfg := &ConfigFile{
+		Tunnels: []TunnelConfig{
+			{
+				Server: "server1",
+				Ports:  []string{"80:80"},
+			},
+		},
+	}
+
+	// 1. Test Add
+	AddTunnelToConfig(cfg, "server1", "90:90")
+	if len(cfg.Tunnels[0].Ports) != 2 || cfg.Tunnels[0].Ports[1] != "90:90" {
+		t.Errorf("AddTunnelToConfig failed to append port, ports: %v", cfg.Tunnels[0].Ports)
+	}
+
+	AddTunnelToConfig(cfg, "server2", "22:22")
+	if len(cfg.Tunnels) != 2 || cfg.Tunnels[1].Server != "server2" {
+		t.Errorf("AddTunnelToConfig failed to add new server")
+	}
+
+	// 2. Test Remove
+	removed := RemoveTunnelTargetFromConfig(cfg, "server1", "80:80")
+	if !removed || len(cfg.Tunnels[0].Ports) != 1 || cfg.Tunnels[0].Ports[0] != "90:90" {
+		t.Errorf("RemoveTunnelTargetFromConfig failed to remove port mapping")
+	}
+
+	removed = RemoveTunnelTargetFromConfig(cfg, "server1", "non-existent")
+	if removed {
+		t.Errorf("RemoveTunnelTargetFromConfig reported removal for non-existent mapping")
+	}
+}

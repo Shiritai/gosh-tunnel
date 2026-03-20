@@ -160,6 +160,65 @@ func expandPorts(mapping string) ([]portMapping, error) {
 	return mappings, nil
 }
 
+// SaveConfig writes the ConfigFile back to the YAML file.
+func SaveConfig(path string, cfg *ConfigFile) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal yaml: %w", err)
+	}
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+	return nil
+}
+
+// AddTunnelToConfig adds or updates a tunnel entry in the ConfigFile struct.
+func AddTunnelToConfig(cfg *ConfigFile, server string, portMapping string) {
+	for i, t := range cfg.Tunnels {
+		if t.Server == server {
+			// Check if mapping already exists
+			for _, p := range t.Ports {
+				if p == portMapping {
+					return
+				}
+			}
+			cfg.Tunnels[i].Ports = append(cfg.Tunnels[i].Ports, portMapping)
+			return
+		}
+	}
+
+	// New server entry
+	cfg.Tunnels = append(cfg.Tunnels, TunnelConfig{
+		Server: server,
+		Ports:  []string{portMapping},
+	})
+}
+
+// RemoveTunnelTargetFromConfig removes a specific port mapping string from the ConfigFile struct.
+// It returns true if anything was removed.
+func RemoveTunnelTargetFromConfig(cfg *ConfigFile, server string, portMapping string) bool {
+	removed := false
+	for i, t := range cfg.Tunnels {
+		if t.Server == server {
+			var newPorts []string
+			for _, p := range t.Ports {
+				if p != portMapping {
+					newPorts = append(newPorts, p)
+				} else {
+					removed = true
+				}
+			}
+			cfg.Tunnels[i].Ports = newPorts
+			
+			// If no ports left, we keep the server entry but it's empty.
+			// Alternatively we could remove it, but keeping it is safer.
+			return removed
+		}
+	}
+	return removed
+}
+
 func parseRange(r string) ([]int, error) {
 	if !strings.Contains(r, "-") {
 		p, err := strconv.Atoi(r)
@@ -194,3 +253,4 @@ func parseRange(r string) ([]int, error) {
 	}
 	return res, nil
 }
+
