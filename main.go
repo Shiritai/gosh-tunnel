@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -60,12 +61,18 @@ var startCmd = &cobra.Command{
 					log.Printf("Error: Failed to resolve tunnels from %s: %v", cfgPath, err)
 				} else {
 					log.Printf("DEBUG: Found %d tunnels to establish.", len(resolved))
+					var wg sync.WaitGroup
 					for _, r := range resolved {
-						log.Printf("DEBUG: Adding tunnel %s...", r.Name)
-						if err := mgr.Add(r); err != nil {
-							log.Printf("Error adding tunnel %s: %v", r.Name, err)
-						}
+						wg.Add(1)
+						go func(rt config.ResolvedTunnel) {
+							defer wg.Done()
+							log.Printf("DEBUG: Adding tunnel %s...", rt.Name)
+							if err := mgr.Add(rt); err != nil {
+								log.Printf("Error adding tunnel %s: %v", rt.Name, err)
+							}
+						}(r)
 					}
+					wg.Wait()
 				}
 			}
 		} else {

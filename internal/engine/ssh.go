@@ -65,26 +65,31 @@ func New(host, port, user, keyPath string) *Engine {
 // Connect dial the SSH server and starts a keep-alive routine.
 func (e *Engine) Connect() error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if e.Client != nil {
+		e.mu.Unlock()
 		return nil // Already connected
 	}
+	// We use the lock only to gather configuration, then release it for the Dial
+	user := e.User
+	host := e.HostName
+	port := e.Port
+	keyPath := e.KeyPath
+	e.mu.Unlock()
 
 	var auths []ssh.AuthMethod
 	var tried []string
 
 	// 1. Try specified key path
-	if e.KeyPath != "" {
-		tried = append(tried, fmt.Sprintf("file:%s", e.KeyPath))
-		if auth, err := parseKey(e.KeyPath); err == nil {
+	if keyPath != "" {
+		tried = append(tried, fmt.Sprintf("file:%s", keyPath))
+		if auth, err := parseKey(keyPath); err == nil {
 			auths = append(auths, auth)
 		} else {
-			log.Printf("Warning: failed to use key %s: %v", e.KeyPath, err)
+			log.Printf("Warning: failed to use key %s: %v", keyPath, err)
 		}
 	}
 
-	// 2. Try default keys if no specific key was successful
+	// 2. Try default keys
 	if len(auths) == 0 {
 		home, _ := os.UserHomeDir()
 		defaults := []string{
@@ -100,7 +105,7 @@ func (e *Engine) Connect() error {
 		}
 	}
 
-	// 3. Always include SSH Agent if available
+	// 3. Always include SSH Agent
 	if agent := agentAuth(); agent != nil {
 		tried = append(tried, "ssh-agent")
 		auths = append(auths, agent)
@@ -111,19 +116,28 @@ func (e *Engine) Connect() error {
 	}
 
 	config := &ssh.ClientConfig{
-		User: e.User,
-		Auth: auths,
+		User:            user,
+		Auth:            auths,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         10 * time.Second,
 	}
 
-	addr := net.JoinHostPort(e.HostName, e.Port)
+	addr := net.JoinHostPort(host, port)
 	client, err := ssh.Dial("tcp", addr, config)
 	if err != nil {
 		return fmt.Errorf("ssh dial failed: %w", err)
 	}
 
+	e.mu.Lock()
+	if e.Client != nil {
+		// Someone else connected while we were dialing
+		client.Close()
+		e.mu.Unlock()
+		return nil
+	}
 	e.Client = client
+	e.mu.Unlock()
+
 	go e.keepAlive(client)
 	return nil
 }
@@ -144,11 +158,13 @@ func (e *Engine) GetClient() (*ssh.Client, error) {
 		if err != nil {
 			log.Printf("GetClient detected dead connection for %s, reconnecting...", e.HostName)
 			client.Close()
+			
 			e.mu.Lock()
 			if e.Client == client {
 				e.Client = nil
 			}
 			e.mu.Unlock()
+
 			if err := e.Connect(); err != nil {
 				return nil, err
 			}

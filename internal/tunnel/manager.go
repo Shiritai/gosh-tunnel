@@ -36,9 +36,8 @@ func NewManager() *Manager {
 // Add starts a new tunnel or returns an error if one already exists
 func (m *Manager) Add(c config.ResolvedTunnel) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if _, exists := m.tunnels[c.Name]; exists {
+		m.mu.Unlock()
 		return fmt.Errorf("tunnel %s already exists", c.Name)
 	}
 
@@ -48,7 +47,9 @@ func (m *Manager) Add(c config.ResolvedTunnel) error {
 		eng = engine.New(c.HostName, c.Port, c.User, c.KeyPath)
 		m.engines[engineKey] = eng
 	}
+	m.mu.Unlock()
 	
+	// Connect to engine outside of manager lock
 	if _, err := eng.GetClient(); err != nil {
 		log.Printf("Warning: failed to connect engine [%s] during add: %v. Will retry on connection.", engineKey, err)
 	}
@@ -65,7 +66,16 @@ func (m *Manager) Add(c config.ResolvedTunnel) error {
 		return fmt.Errorf("failed to start tunnel %s: %w", c.Name, err)
 	}
 	log.Printf("Started tunnel: %s", c.Name)
+
+	m.mu.Lock()
+	if _, exists := m.tunnels[c.Name]; exists {
+		m.mu.Unlock()
+		cancel()
+		t.Listener.Close() // Cleanup
+		return fmt.Errorf("tunnel %s was concurrently created", c.Name)
+	}
 	m.tunnels[c.Name] = t
+	m.mu.Unlock()
 	return nil
 }
 
