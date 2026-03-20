@@ -1,0 +1,12 @@
+# By defualt, it will read ~/.ssh/config. 
+# You can specify a custom path.
+ssh_config: "~/.ssh/config" 
+
+tunnels:
+  - server: "gpu-server"        # Must match a Host alias in ~/.ssh/config
+    ports: 
+      - "8080-8084:8080-8084"  # Range Mapping (Local : Remote)
+      
+  - server: "workstation"
+    ports:
+      - "9090-9092:9090-9092"
