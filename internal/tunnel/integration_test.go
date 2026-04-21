@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -99,7 +100,7 @@ func startMockSSHServer(t *testing.T, signer ssh.Signer) string {
 						continue
 					}
 
-					dest := fmt.Sprintf("%s:%d", msg.DestAddr, msg.DestPort)
+					dest := net.JoinHostPort(msg.DestAddr, strconv.Itoa(int(msg.DestPort)))
 					targetConn, err := net.Dial("tcp", dest)
 					if err != nil {
 						newChannel.Reject(ssh.ConnectionFailed, fmt.Sprintf("failed to connect to %s", dest))
