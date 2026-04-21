@@ -37,9 +37,17 @@ func ValidateProxyCommandTokenValues(host, port, user string) error {
 }
 
 type TunnelConfig struct {
-	Server string   `yaml:"server"`
-	Ports  []string `yaml:"ports"`
+	Server     string   `yaml:"server"`
+	RemoteHost string   `yaml:"remote_host,omitempty"`
+	Ports      []string `yaml:"ports"`
 }
+
+// DefaultRemoteHost is what we dial on the remote side when the user does not
+// specify remote_host. We use "localhost" (not "127.0.0.1") so the remote sshd
+// performs resolution and tries both IPv4 and IPv6 — matching `ssh -L` and
+// avoiding "connection refused" when the target (e.g. Vite dev server) binds
+// only to ::1.
+const DefaultRemoteHost = "localhost"
 
 type ConfigFile struct {
 	SSHConfigPath string         `yaml:"ssh_config"`
@@ -55,6 +63,7 @@ type ResolvedTunnel struct {
 	KeyPath      string
 	ProxyCommand string
 	LocalPort    int
+	RemoteHost   string
 	RemotePort   int
 }
 
@@ -87,48 +96,89 @@ func LoadConfig(path string) (*ConfigFile, error) {
 	return &cfg, nil
 }
 
-// ResolveTunnels parses the ssh_config and expands the ranges into individual tunnels.
-func ResolveTunnels(cfg *ConfigFile) ([]ResolvedTunnel, error) {
-	f, err := os.Open(cfg.SSHConfigPath)
+// ServerSettings holds the per-server fields resolved from ~/.ssh/config.
+type ServerSettings struct {
+	HostName     string
+	Port         string
+	User         string
+	KeyPath      string
+	ProxyCommand string
+}
+
+// ResolveServer looks up a single Host alias in the given ssh_config file and
+// returns the effective connection settings, applying the same defaults and
+// ProxyCommand token expansion as ResolveTunnels. If sshConfigPath cannot be
+// opened the alias is returned as-is with defaults (User=$USER, Port=22), so
+// callers still work when the user has no ssh_config.
+func ResolveServer(sshConfigPath, alias string) (ServerSettings, error) {
+	s := ServerSettings{
+		HostName: alias,
+		Port:     "22",
+		User:     os.Getenv("USER"),
+	}
+
+	f, err := os.Open(sshConfigPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open ssh config: %w", err)
+		if os.IsNotExist(err) {
+			return s, nil
+		}
+		return s, fmt.Errorf("failed to open ssh config: %w", err)
 	}
 	defer f.Close()
 
 	sshCfg, err := ssh_config.Decode(f)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode ssh config: %w", err)
+		return s, fmt.Errorf("failed to decode ssh config: %w", err)
 	}
 
+	if hn, err := sshCfg.Get(alias, "Hostname"); err == nil && hn != "" {
+		s.HostName = hn
+	}
+	if u, _ := sshCfg.Get(alias, "User"); u != "" {
+		s.User = u
+	}
+	if p, _ := sshCfg.Get(alias, "Port"); p != "" {
+		s.Port = p
+	}
+	if kp, _ := sshCfg.Get(alias, "IdentityFile"); kp != "" {
+		if strings.HasPrefix(kp, "~/") {
+			home, _ := os.UserHomeDir()
+			kp = filepath.Join(home, kp[2:])
+		}
+		s.KeyPath = kp
+	}
+	if pc, _ := sshCfg.Get(alias, "ProxyCommand"); pc != "" {
+		if err := ValidateProxyCommandTokenValues(s.HostName, s.Port, s.User); err != nil {
+			return s, fmt.Errorf("server %q: %w", alias, err)
+		}
+		s.ProxyCommand = ExpandProxyCommandTokens(pc, s.HostName, s.Port, s.User)
+	}
+	return s, nil
+}
+
+// DefaultSSHConfigPath returns ~/.ssh/config.
+func DefaultSSHConfigPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".ssh", "config")
+}
+
+// ResolveTunnels parses the ssh_config and expands the ranges into individual tunnels.
+func ResolveTunnels(cfg *ConfigFile) ([]ResolvedTunnel, error) {
 	var resolved []ResolvedTunnel
 	for _, t := range cfg.Tunnels {
-		hostName, err := sshCfg.Get(t.Server, "Hostname")
-		if err != nil || hostName == "" {
-			hostName = t.Server // Default to server name if not found
+		s, err := ResolveServer(cfg.SSHConfigPath, t.Server)
+		if err != nil {
+			return nil, err
 		}
+		hostName := s.HostName
+		port := s.Port
+		user := s.User
+		keyPath := s.KeyPath
+		proxyCommand := s.ProxyCommand
 
-		user, _ := sshCfg.Get(t.Server, "User")
-		if user == "" {
-			user = os.Getenv("USER")
-		}
-
-		port, _ := sshCfg.Get(t.Server, "Port")
-		if port == "" {
-			port = "22"
-		}
-
-		keyPath, _ := sshCfg.Get(t.Server, "IdentityFile")
-		if strings.HasPrefix(keyPath, "~/") {
-			home, _ := os.UserHomeDir()
-			keyPath = filepath.Join(home, keyPath[2:])
-		}
-
-		proxyCommand, _ := sshCfg.Get(t.Server, "ProxyCommand")
-		if proxyCommand != "" {
-			if err := ValidateProxyCommandTokenValues(hostName, port, user); err != nil {
-				return nil, fmt.Errorf("server %q: %w", t.Server, err)
-			}
-			proxyCommand = ExpandProxyCommandTokens(proxyCommand, hostName, port, user)
+		remoteHost := t.RemoteHost
+		if remoteHost == "" {
+			remoteHost = DefaultRemoteHost
 		}
 
 		for _, p := range t.Ports {
@@ -146,6 +196,7 @@ func ResolveTunnels(cfg *ConfigFile) ([]ResolvedTunnel, error) {
 					KeyPath:      keyPath,
 					ProxyCommand: proxyCommand,
 					LocalPort:    m.local,
+					RemoteHost:   remoteHost,
 					RemotePort:   m.remote,
 				})
 			}
@@ -215,10 +266,12 @@ func SaveConfig(path string, cfg *ConfigFile) error {
 }
 
 // AddTunnelToConfig adds or updates a tunnel entry in the ConfigFile struct.
-func AddTunnelToConfig(cfg *ConfigFile, server string, portMapping string) {
+// remoteHost is only recorded when creating a new server entry, and only when
+// it is non-default; existing entries are left untouched to avoid clobbering
+// user-edited config.
+func AddTunnelToConfig(cfg *ConfigFile, server string, portMapping string, remoteHost string) {
 	for i, t := range cfg.Tunnels {
 		if t.Server == server {
-			// Check if mapping already exists
 			for _, p := range t.Ports {
 				if p == portMapping {
 					return
@@ -229,11 +282,14 @@ func AddTunnelToConfig(cfg *ConfigFile, server string, portMapping string) {
 		}
 	}
 
-	// New server entry
-	cfg.Tunnels = append(cfg.Tunnels, TunnelConfig{
+	entry := TunnelConfig{
 		Server: server,
 		Ports:  []string{portMapping},
-	})
+	}
+	if remoteHost != "" && remoteHost != DefaultRemoteHost {
+		entry.RemoteHost = remoteHost
+	}
+	cfg.Tunnels = append(cfg.Tunnels, entry)
 }
 
 // RemoveTunnelTargetFromConfig removes a specific port mapping string from the ConfigFile struct.

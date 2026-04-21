@@ -121,12 +121,12 @@ func TestConfigPersistence(t *testing.T) {
 	}
 
 	// 1. Test Add
-	AddTunnelToConfig(cfg, "server1", "90:90")
+	AddTunnelToConfig(cfg, "server1", "90:90", "")
 	if len(cfg.Tunnels[0].Ports) != 2 || cfg.Tunnels[0].Ports[1] != "90:90" {
 		t.Errorf("AddTunnelToConfig failed to append port, ports: %v", cfg.Tunnels[0].Ports)
 	}
 
-	AddTunnelToConfig(cfg, "server2", "22:22")
+	AddTunnelToConfig(cfg, "server2", "22:22", "")
 	if len(cfg.Tunnels) != 2 || cfg.Tunnels[1].Server != "server2" {
 		t.Errorf("AddTunnelToConfig failed to add new server")
 	}

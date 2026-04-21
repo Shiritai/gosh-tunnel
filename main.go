@@ -145,17 +145,33 @@ var addCmd = &cobra.Command{
 		}
 
 		save, _ := cmd.Flags().GetBool("save")
+		remoteHost, _ := cmd.Flags().GetString("remote-host")
+		if remoteHost == "" {
+			remoteHost = config.DefaultRemoteHost
+		}
 		server := parts[0]
 		portMapping := fmt.Sprintf("%d:%d", localPort, remotePort)
 
+		sshCfgPath, _ := cmd.Flags().GetString("ssh-config")
+		if sshCfgPath == "" {
+			sshCfgPath = config.DefaultSSHConfigPath()
+		}
+		ss, err := config.ResolveServer(sshCfgPath, server)
+		if err != nil {
+			fmt.Printf("Failed to resolve server %q from %s: %v\n", server, sshCfgPath, err)
+			return
+		}
+
 		tunnelCfg := config.ResolvedTunnel{
-			Name:       fmt.Sprintf("%s-%s", server, portMapping),
-			HostName:   server,
-			Port:       "22", // Default
-			User:       os.Getenv("USER"),
-			KeyPath:    "",
-			LocalPort:  localPort,
-			RemotePort: remotePort,
+			Name:         fmt.Sprintf("%s-%s", server, portMapping),
+			HostName:     ss.HostName,
+			Port:         ss.Port,
+			User:         ss.User,
+			KeyPath:      ss.KeyPath,
+			ProxyCommand: ss.ProxyCommand,
+			LocalPort:    localPort,
+			RemoteHost:   remoteHost,
+			RemotePort:   remotePort,
 		}
 
 		cli := daemon.NewClient()
@@ -175,7 +191,7 @@ var addCmd = &cobra.Command{
 				fmt.Printf("Warning: Created tunnel but failed to load config for saving: %v\n", err)
 				return
 			}
-			config.AddTunnelToConfig(cfg, server, portMapping)
+			config.AddTunnelToConfig(cfg, server, portMapping, remoteHost)
 			if err := config.SaveConfig(cfgFile, cfg); err != nil {
 				fmt.Printf("Error: Failed to save config to %s: %v\n", cfgFile, err)
 			} else {
@@ -238,6 +254,8 @@ func main() {
 	
 	addCmd.Flags().BoolP("save", "s", false, "Persist the new tunnel to the config file")
 	addCmd.Flags().StringP("config", "c", "", "Path to config file for persistence")
+	addCmd.Flags().String("remote-host", config.DefaultRemoteHost, "Remote host to dial from the SSH server (default: localhost)")
+	addCmd.Flags().String("ssh-config", "", "Path to ssh_config for resolving the server alias (default: ~/.ssh/config)")
 	
 	rmCmd.Flags().BoolP("save", "s", false, "Remove the tunnel from the config file as well")
 	rmCmd.Flags().StringP("config", "c", "", "Path to config file for persistence")

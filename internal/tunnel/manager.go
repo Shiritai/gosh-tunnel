@@ -209,7 +209,11 @@ func (m *Manager) handleConnection(ctx context.Context, t *Tunnel, localConn net
 		return
 	}
 
-	remoteAddr := fmt.Sprintf("127.0.0.1:%d", t.Config.RemotePort)
+	remoteHost := t.Config.RemoteHost
+	if remoteHost == "" {
+		remoteHost = "localhost"
+	}
+	remoteAddr := net.JoinHostPort(remoteHost, fmt.Sprintf("%d", t.Config.RemotePort))
 	remoteConn, err := sshClient.Dial("tcp", remoteAddr)
 	if err != nil {
 		log.Printf("[%s] Failed to dial remote %s via SSH: %v", t.Config.Name, remoteAddr, err)

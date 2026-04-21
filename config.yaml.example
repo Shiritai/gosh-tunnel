@@ -10,3 +10,11 @@ tunnels:
   - server: "workstation"
     ports:
       - "9090-9092:9090-9092"
+
+  # remote_host is optional, defaults to "localhost". The remote sshd resolves
+  # it so both IPv4 and IPv6 are tried (matches `ssh -L`). Override when the
+  # target service is reachable from the SSH server under a different name.
+  # - server: "db-server"
+  #   remote_host: "localhost"
+  #   ports:
+  #     - "5432:5432"
