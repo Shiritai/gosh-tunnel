@@ -6,12 +6,26 @@ import (
 	"io"
 	"log"
 	"net"
+	"runtime/debug"
 	"sync"
 	"time"
 
 	"gosh-tunnel/internal/config"
 	"gosh-tunnel/internal/engine"
 )
+
+// safeGo runs fn in a goroutine and recovers from panics so a single bad
+// connection or listener cannot crash the daemon.
+func safeGo(label string, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("PANIC in %s: %v\n%s", label, r, debug.Stack())
+			}
+		}()
+		fn()
+	}()
+}
 
 type Tunnel struct {
 	Config   config.ResolvedTunnel
@@ -24,12 +38,52 @@ type Manager struct {
 	mu      sync.Mutex
 	tunnels map[string]*Tunnel
 	engines map[string]*engine.Engine
+	conns   sync.WaitGroup // tracks in-flight handleConnection goroutines
 }
 
 func NewManager() *Manager {
 	return &Manager{
 		tunnels: make(map[string]*Tunnel),
 		engines: make(map[string]*engine.Engine),
+	}
+}
+
+// Shutdown stops accepting new connections on every tunnel, cancels the
+// per-tunnel context, closes every cached SSH engine, and waits for in-flight
+// connections to drain. If ctx expires first it returns ctx.Err() but still
+// performs the cancel/close steps.
+func (m *Manager) Shutdown(ctx context.Context) error {
+	m.mu.Lock()
+	tunnels := make([]*Tunnel, 0, len(m.tunnels))
+	for name, t := range m.tunnels {
+		tunnels = append(tunnels, t)
+		delete(m.tunnels, name)
+	}
+	engines := m.engines
+	m.engines = make(map[string]*engine.Engine)
+	m.mu.Unlock()
+
+	for _, t := range tunnels {
+		t.cancel()
+		if t.Listener != nil {
+			t.Listener.Close()
+		}
+	}
+	for _, eng := range engines {
+		eng.Close()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.conns.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		log.Printf("Shutdown: timed out waiting for %d tunnel(s) to drain in-flight connections", len(tunnels))
+		return ctx.Err()
 	}
 }
 
@@ -118,12 +172,11 @@ func (m *Manager) startTunnel(ctx context.Context, t *Tunnel) error {
 	}
 	t.Listener = listener
 
-	go func() {
-		// Close listener when context is cancelled
-		go func() {
+	safeGo("tunnel.accept["+t.Config.Name+"]", func() {
+		safeGo("tunnel.closer["+t.Config.Name+"]", func() {
 			<-ctx.Done()
 			listener.Close()
-		}()
+		})
 
 		for {
 			conn, err := listener.Accept()
@@ -132,15 +185,18 @@ func (m *Manager) startTunnel(ctx context.Context, t *Tunnel) error {
 				case <-ctx.Done():
 					return
 				default:
-					// Log unexpected errors but keep listening
 					log.Printf("Accept error on %s: %v", localAddr, err)
-					time.Sleep(100 * time.Millisecond) // Avoid tight loop if persistent error
+					time.Sleep(100 * time.Millisecond)
 					continue
 				}
 			}
-			go m.handleConnection(ctx, t, conn)
+			m.conns.Add(1)
+			safeGo("tunnel.handle["+t.Config.Name+"]", func() {
+				defer m.conns.Done()
+				m.handleConnection(ctx, t, conn)
+			})
 		}
-	}()
+	})
 	return nil
 }
 

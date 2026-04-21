@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -9,12 +10,15 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"gosh-tunnel/internal/config"
 	"gosh-tunnel/internal/daemon"
 	"gosh-tunnel/internal/tunnel"
 )
+
+const shutdownTimeout = 5 * time.Second
 
 var rootCmd = &cobra.Command{
 	Use:   "gosh",
@@ -84,7 +88,15 @@ var startCmd = &cobra.Command{
 
 		log.Println("Daemon is fully initialized and operational. Press Ctrl+C to stop.")
 		s := <-sigs
-		log.Printf("DEBUG: Signal received: %v. Shutting down daemon...", s)
+		log.Printf("Signal received: %v. Shutting down (timeout %s)...", s, shutdownTimeout)
+
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := mgr.Shutdown(ctx); err != nil {
+			log.Printf("Shutdown completed with error: %v", err)
+		} else {
+			log.Println("Shutdown complete; all tunnels drained cleanly.")
+		}
 	},
 }
 
