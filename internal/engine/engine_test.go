@@ -52,6 +52,10 @@ func generateTestKey(t *testing.T) (string, ssh.Signer) {
 func startMockSSHServer(t *testing.T, signer ssh.Signer) (string, net.Listener) {
 	t.Helper()
 
+	// Isolate host key verification per test: empty known_hosts file
+	// allows TOFU to accept the mock server's ephemeral key.
+	t.Setenv("GOSH_KNOWN_HOSTS", filepath.Join(t.TempDir(), "known_hosts"))
+
 	config := &ssh.ServerConfig{
 		NoClientAuth: true,
 	}

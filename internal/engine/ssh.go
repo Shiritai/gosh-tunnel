@@ -127,19 +127,22 @@ func (e *Engine) Connect() error {
 		return fmt.Errorf("no valid SSH authentication methods found (tried: %v)", tried)
 	}
 
-	cfg := &ssh.ClientConfig{
-		User:            user,
-		Auth:            auths,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         10 * time.Second,
-	}
-
 	addr := net.JoinHostPort(host, port)
 
-	var (
-		client *ssh.Client
-		err    error
-	)
+	hk, err := hostKeyCallbackFor(addr)
+	if err != nil {
+		return fmt.Errorf("host key verification setup: %w", err)
+	}
+
+	cfg := &ssh.ClientConfig{
+		User:              user,
+		Auth:              auths,
+		HostKeyCallback:   hk.Callback,
+		HostKeyAlgorithms: hk.Algorithms,
+		Timeout:           10 * time.Second,
+	}
+
+	var client *ssh.Client
 	if proxyCommand != "" {
 		log.Printf("DEBUG: Using ProxyCommand for %s: %s", addr, proxyCommand)
 		client, err = dialViaProxyCommand(proxyCommand, addr, cfg)
@@ -182,7 +185,7 @@ func dialViaProxyCommand(proxyCommand, addr string, cfg *ssh.ClientConfig) (*ssh
 		return nil, fmt.Errorf("proxy command start: %w", err)
 	}
 
-	conn := newStdioConn(stdout, stdin, cmd)
+	conn := newStdioConn(stdout, stdin, cmd, addr)
 
 	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
@@ -197,12 +200,13 @@ type stdioConn struct {
 	r      io.ReadCloser
 	w      io.WriteCloser
 	cmd    *exec.Cmd
+	remote string
 	once   sync.Once
 	closed chan struct{}
 }
 
-func newStdioConn(r io.ReadCloser, w io.WriteCloser, cmd *exec.Cmd) *stdioConn {
-	return &stdioConn{r: r, w: w, cmd: cmd, closed: make(chan struct{})}
+func newStdioConn(r io.ReadCloser, w io.WriteCloser, cmd *exec.Cmd, remote string) *stdioConn {
+	return &stdioConn{r: r, w: w, cmd: cmd, remote: remote, closed: make(chan struct{})}
 }
 
 func (s *stdioConn) Read(p []byte) (int, error)  { return s.r.Read(p) }
@@ -236,8 +240,8 @@ type stdioAddr struct{ label string }
 func (a stdioAddr) Network() string { return "proxycommand" }
 func (a stdioAddr) String() string  { return a.label }
 
-func (s *stdioConn) LocalAddr() net.Addr               { return stdioAddr{"local"} }
-func (s *stdioConn) RemoteAddr() net.Addr              { return stdioAddr{"remote"} }
+func (s *stdioConn) LocalAddr() net.Addr  { return stdioAddr{"proxycommand:local"} }
+func (s *stdioConn) RemoteAddr() net.Addr { return stdioAddr{s.remote} }
 func (s *stdioConn) SetDeadline(_ time.Time) error     { return nil }
 func (s *stdioConn) SetReadDeadline(_ time.Time) error { return nil }
 func (s *stdioConn) SetWriteDeadline(_ time.Time) error {
@@ -275,6 +279,17 @@ func (e *Engine) GetClient() (*ssh.Client, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.Client, nil
+}
+
+// Close terminates the cached SSH client (if any). Safe to call multiple times.
+func (e *Engine) Close() {
+	e.mu.Lock()
+	client := e.Client
+	e.Client = nil
+	e.mu.Unlock()
+	if client != nil {
+		client.Close()
+	}
 }
 
 func (e *Engine) keepAlive(client *ssh.Client) {

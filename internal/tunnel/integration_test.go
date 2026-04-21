@@ -60,6 +60,8 @@ func generateTestKey(t *testing.T) (string, ssh.Signer) {
 func startMockSSHServer(t *testing.T, signer ssh.Signer) string {
 	t.Helper()
 
+	t.Setenv("GOSH_KNOWN_HOSTS", filepath.Join(t.TempDir(), "known_hosts"))
+
 	config := &ssh.ServerConfig{
 		NoClientAuth: true,
 	}
