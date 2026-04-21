@@ -4,12 +4,37 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/kevinburke/ssh_config"
 	"gopkg.in/yaml.v3"
 )
+
+// Validators for values substituted into a ProxyCommand template.
+// They reject anything that could break out of the token and inject shell.
+var (
+	validHostRe = regexp.MustCompile(`^[A-Za-z0-9._\-:\[\]]+$`)
+	validPortRe = regexp.MustCompile(`^[0-9]{1,5}$`)
+	validUserRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9._\-]*$`)
+)
+
+// ValidateProxyCommandTokenValues ensures host/port/user are safe to substitute
+// into a `sh -c <cmd>` ProxyCommand. It rejects values containing shell
+// metacharacters or other unexpected bytes that could enable command injection.
+func ValidateProxyCommandTokenValues(host, port, user string) error {
+	if !validHostRe.MatchString(host) {
+		return fmt.Errorf("unsafe host %q for ProxyCommand substitution", host)
+	}
+	if !validPortRe.MatchString(port) {
+		return fmt.Errorf("unsafe port %q for ProxyCommand substitution", port)
+	}
+	if user != "" && !validUserRe.MatchString(user) {
+		return fmt.Errorf("unsafe user %q for ProxyCommand substitution", user)
+	}
+	return nil
+}
 
 type TunnelConfig struct {
 	Server string   `yaml:"server"`
@@ -99,7 +124,12 @@ func ResolveTunnels(cfg *ConfigFile) ([]ResolvedTunnel, error) {
 		}
 
 		proxyCommand, _ := sshCfg.Get(t.Server, "ProxyCommand")
-		proxyCommand = ExpandProxyCommandTokens(proxyCommand, hostName, port, user)
+		if proxyCommand != "" {
+			if err := ValidateProxyCommandTokenValues(hostName, port, user); err != nil {
+				return nil, fmt.Errorf("server %q: %w", t.Server, err)
+			}
+			proxyCommand = ExpandProxyCommandTokens(proxyCommand, hostName, port, user)
+		}
 
 		for _, p := range t.Ports {
 			mappings, err := expandPorts(p)
