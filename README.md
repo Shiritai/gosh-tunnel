@@ -25,6 +25,20 @@ go mod tidy
 go build -o gosh .
 ```
 
+### Development / Testing Prerequisites
+
+The runtime has no external dependencies, but the test suite includes an integration test that exercises SSH-over-`ProxyCommand` by bridging stdio to a local mock SSH server with `nc` (netcat). To run the full suite you'll need it on `PATH`:
+
+- **macOS**: `nc` ships by default — nothing to install.
+- **Linux (Debian/Ubuntu)**: `sudo apt-get install netcat-openbsd`
+- **Linux (Fedora/RHEL)**: `sudo dnf install nmap-ncat`
+
+If `nc` is missing the ProxyCommand integration test is skipped automatically; the rest of the suite still runs.
+
+```bash
+go test ./...
+```
+
 ## 📖 Configuration
 
 Gosh uses a simple YAML file to define the initial state. Create a `config.yaml`:
