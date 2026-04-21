@@ -23,13 +23,20 @@ type ConfigFile struct {
 
 // ResolvedTunnel represents a single port mapping after expanding port ranges
 type ResolvedTunnel struct {
-	Name       string
-	HostName   string
-	Port       string
-	User       string
-	KeyPath    string
-	LocalPort  int
-	RemotePort int
+	Name         string
+	HostName     string
+	Port         string
+	User         string
+	KeyPath      string
+	ProxyCommand string
+	LocalPort    int
+	RemotePort   int
+}
+
+// ExpandProxyCommandTokens expands OpenSSH ProxyCommand tokens (%h, %p, %r, %%).
+func ExpandProxyCommandTokens(cmd, host, port, user string) string {
+	first := strings.NewReplacer("%%", "\x00", "%h", host, "%p", port, "%r", user).Replace(cmd)
+	return strings.ReplaceAll(first, "\x00", "%")
 }
 
 // LoadConfig reads the YAML configuration file.
@@ -91,6 +98,9 @@ func ResolveTunnels(cfg *ConfigFile) ([]ResolvedTunnel, error) {
 			keyPath = filepath.Join(home, keyPath[2:])
 		}
 
+		proxyCommand, _ := sshCfg.Get(t.Server, "ProxyCommand")
+		proxyCommand = ExpandProxyCommandTokens(proxyCommand, hostName, port, user)
+
 		for _, p := range t.Ports {
 			mappings, err := expandPorts(p)
 			if err != nil {
@@ -99,13 +109,14 @@ func ResolveTunnels(cfg *ConfigFile) ([]ResolvedTunnel, error) {
 
 			for _, m := range mappings {
 				resolved = append(resolved, ResolvedTunnel{
-					Name:       fmt.Sprintf("%s-%d:%d", t.Server, m.local, m.remote),
-					HostName:   hostName,
-					Port:       port,
-					User:       user,
-					KeyPath:    keyPath,
-					LocalPort:  m.local,
-					RemotePort: m.remote,
+					Name:         fmt.Sprintf("%s-%d:%d", t.Server, m.local, m.remote),
+					HostName:     hostName,
+					Port:         port,
+					User:         user,
+					KeyPath:      keyPath,
+					ProxyCommand: proxyCommand,
+					LocalPort:    m.local,
+					RemotePort:   m.remote,
 				})
 			}
 		}

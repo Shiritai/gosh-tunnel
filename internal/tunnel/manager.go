@@ -41,10 +41,10 @@ func (m *Manager) Add(c config.ResolvedTunnel) error {
 		return fmt.Errorf("tunnel %s already exists", c.Name)
 	}
 
-	engineKey := c.User + "@" + c.HostName + ":" + c.Port
+	engineKey := c.User + "@" + c.HostName + ":" + c.Port + "|" + c.ProxyCommand
 	eng, ok := m.engines[engineKey]
 	if !ok {
-		eng = engine.New(c.HostName, c.Port, c.User, c.KeyPath)
+		eng = engine.NewWithProxy(c.HostName, c.Port, c.User, c.KeyPath, c.ProxyCommand)
 		m.engines[engineKey] = eng
 	}
 	m.mu.Unlock()
