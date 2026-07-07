@@ -16,13 +16,21 @@ import (
 type Request struct {
 	Command string                `json:"command"`
 	Tunnel  config.ResolvedTunnel `json:"tunnel,omitempty"`
-	Name    string                `json:"name,omitempty"`
+	// rm addressing modes, checked in order: LocalPort, Server, Name.
+	Name      string `json:"name,omitempty"`
+	LocalPort int    `json:"local_port,omitempty"`
+	Server    string `json:"server,omitempty"`
 }
 
 type Response struct {
 	Success bool     `json:"success"`
 	Message string   `json:"message,omitempty"`
 	Tunnels []string `json:"tunnels,omitempty"`
+	// Details is the structured counterpart of Tunnels.
+	Details []config.ResolvedTunnel `json:"details,omitempty"`
+	// Removed reports what an rm actually tore down so clients can persist
+	// config changes from authoritative data instead of parsing names.
+	Removed []config.ResolvedTunnel `json:"removed,omitempty"`
 }
 
 var SocketPath = "/tmp/gosh-tunnel.sock"
@@ -94,16 +102,39 @@ func (s *Server) handleConnection(conn net.Conn) {
 			s.sendRes(conn, Response{Success: true, Message: fmt.Sprintf("Added tunnel %s", req.Tunnel.Name)})
 		}
 	case "rm":
-		if err := s.manager.Remove(req.Name); err != nil {
+		removed, err := s.removeTunnels(req)
+		if err != nil {
 			s.sendRes(conn, Response{Success: false, Message: err.Error()})
 		} else {
-			s.sendRes(conn, Response{Success: true, Message: fmt.Sprintf("Removed tunnel %s", req.Name)})
+			s.sendRes(conn, Response{Success: true, Message: fmt.Sprintf("Removed %d tunnel(s)", len(removed)), Removed: removed})
 		}
 	case "status":
-		tunnels := s.manager.Status()
-		s.sendRes(conn, Response{Success: true, Tunnels: tunnels})
+		s.sendRes(conn, Response{Success: true, Tunnels: s.manager.Status(), Details: s.manager.List()})
 	default:
 		s.sendRes(conn, Response{Success: false, Message: "unknown command"})
+	}
+}
+
+// removeTunnels dispatches an rm request to the manager based on which
+// addressing mode the request carries.
+func (s *Server) removeTunnels(req Request) ([]config.ResolvedTunnel, error) {
+	switch {
+	case req.LocalPort > 0:
+		rt, err := s.manager.RemoveByLocalPort(req.LocalPort)
+		if err != nil {
+			return nil, err
+		}
+		return []config.ResolvedTunnel{rt}, nil
+	case req.Server != "":
+		return s.manager.RemoveByServer(req.Server)
+	case req.Name != "":
+		rt, err := s.manager.Remove(req.Name)
+		if err != nil {
+			return nil, err
+		}
+		return []config.ResolvedTunnel{rt}, nil
+	default:
+		return nil, fmt.Errorf("rm request must specify local_port, server, or name")
 	}
 }
 

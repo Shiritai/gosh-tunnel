@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"runtime/debug"
+	"sort"
 	"sync"
 	"time"
 
@@ -133,35 +134,92 @@ func (m *Manager) Add(c config.ResolvedTunnel) error {
 	return nil
 }
 
-// Remove stops and removes a specific tunnel by name
-func (m *Manager) Remove(name string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	t, exists := m.tunnels[name]
-	if !exists {
-		return fmt.Errorf("tunnel %s not found", name)
-	}
-
+// removeLocked stops t and deletes it from the map. Caller must hold m.mu.
+func (m *Manager) removeLocked(name string, t *Tunnel) {
 	log.Printf("Stopping tunnel: %s", name)
 	t.cancel()
 	if t.Listener != nil {
 		t.Listener.Close()
 	}
 	delete(m.tunnels, name)
-	return nil
+}
+
+// Remove stops and removes a specific tunnel by its full name and returns the
+// removed tunnel's config so callers can persist the change authoritatively.
+func (m *Manager) Remove(name string) (config.ResolvedTunnel, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	t, exists := m.tunnels[name]
+	if !exists {
+		return config.ResolvedTunnel{}, fmt.Errorf("tunnel %s not found", name)
+	}
+	m.removeLocked(name, t)
+	return t.Config, nil
+}
+
+// RemoveByLocalPort stops and removes the tunnel bound to the given local
+// port. Local ports are unique per host, so this identifies exactly one tunnel.
+func (m *Manager) RemoveByLocalPort(port int) (config.ResolvedTunnel, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for name, t := range m.tunnels {
+		if t.Config.LocalPort == port {
+			m.removeLocked(name, t)
+			return t.Config, nil
+		}
+	}
+	return config.ResolvedTunnel{}, fmt.Errorf("no tunnel on local port %d", port)
+}
+
+// RemoveByServer stops and removes every tunnel belonging to the given server
+// alias and returns their configs. It fails if the alias has no tunnels.
+func (m *Manager) RemoveByServer(server string) ([]config.ResolvedTunnel, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var removed []config.ResolvedTunnel
+	for name, t := range m.tunnels {
+		if t.Config.Server == server {
+			m.removeLocked(name, t)
+			removed = append(removed, t.Config)
+		}
+	}
+	if len(removed) == 0 {
+		return nil, fmt.Errorf("no tunnels for server %s", server)
+	}
+	return removed, nil
 }
 
 // Status returns a list of active tunnel names
 func (m *Manager) Status() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	var active []string
 	for name := range m.tunnels {
 		active = append(active, name)
 	}
 	return active
+}
+
+// List returns the configs of active tunnels sorted by server then local port.
+func (m *Manager) List() []config.ResolvedTunnel {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	list := make([]config.ResolvedTunnel, 0, len(m.tunnels))
+	for _, t := range m.tunnels {
+		list = append(list, t.Config)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].Server != list[j].Server {
+			return list[i].Server < list[j].Server
+		}
+		return list[i].LocalPort < list[j].LocalPort
+	})
+	return list
 }
 
 func (m *Manager) startTunnel(ctx context.Context, t *Tunnel) error {

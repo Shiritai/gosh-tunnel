@@ -72,6 +72,11 @@ This command launches Gosh in the background, establishing the initial connectio
 ```bash
 ./gosh status
 ```
+```text
+LOCAL  SERVER      REMOTE
+1234   gpu-server  localhost:80
+9090   workstation localhost:9090
+```
 
 ### 3. Hot-Add a New Port
 Instantly add a tunnel. Use `--save` to persist it to `config.yaml`.
@@ -81,10 +86,27 @@ Instantly add a tunnel. Use `--save` to persist it to `config.yaml`.
 ```
 
 ### 4. Hot-Remove a Port
-Instantly drop a tunnel. Use `--save` to remove it from `config.yaml`.
+Tunnels are addressed by their **local port** — it is unique on your machine,
+so that is all you need to type. Use `--save` to also remove the mapping from
+`config.yaml`.
 ```bash
-./gosh rm gpu-server-1234:80
-./gosh rm gpu-server-1234:80 --save
+./gosh rm 1234              # remove the tunnel on local port 1234
+./gosh rm 1234 9090         # remove several at once
+./gosh rm gpu-server        # remove every tunnel of a server alias
+./gosh rm gpu-server-1234:80  # legacy full-name form still works
+./gosh rm 1234 --save
+```
+
+### 5. Shell Completion
+`gosh rm <TAB>` queries the running daemon and offers the active local ports
+(with their `server:port` targets) and server aliases as candidates:
+```bash
+# bash: add to ~/.bashrc
+source <(gosh completion bash)
+# zsh: add to ~/.zshrc
+source <(gosh completion zsh)
+# fish
+gosh completion fish | source
 ```
 
 ---

@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -105,19 +107,31 @@ var statusCmd = &cobra.Command{
 	Short: "Get status of active tunnels",
 	Run: func(cmd *cobra.Command, args []string) {
 		cli := daemon.NewClient()
-		tunnels, err := cli.Status()
+		tunnels, err := cli.List()
 		if err != nil {
 			fmt.Printf("Error: %v (Is daemon running?)\n", err)
-			return
+			os.Exit(1)
 		}
 		if len(tunnels) == 0 {
 			fmt.Println("No active tunnels.")
 			return
 		}
-		fmt.Println("Active Tunnels:")
-		for _, t := range tunnels {
-			fmt.Printf(" - %s\n", t)
+		w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "LOCAL\tSERVER\tREMOTE")
+		for _, rt := range tunnels {
+			if rt.LocalPort == 0 && rt.Server == "" {
+				// daemon predates structured status; only the name is known
+				fmt.Fprintf(w, "-\t%s\t-\n", rt.Name)
+				continue
+			}
+			remoteHost := rt.RemoteHost
+			if remoteHost == "" {
+				remoteHost = config.DefaultRemoteHost
+			}
+			remote := net.JoinHostPort(remoteHost, strconv.Itoa(rt.RemotePort))
+			fmt.Fprintf(w, "%d\t%s\t%s\n", rt.LocalPort, rt.Server, remote)
 		}
+		w.Flush()
 	},
 }
 
@@ -164,6 +178,7 @@ var addCmd = &cobra.Command{
 
 		tunnelCfg := config.ResolvedTunnel{
 			Name:         fmt.Sprintf("%s-%s", server, portMapping),
+			Server:       server,
 			HostName:     ss.HostName,
 			Port:         ss.Port,
 			User:         ss.User,
@@ -201,50 +216,169 @@ var addCmd = &cobra.Command{
 	},
 }
 
-var rmCmd = &cobra.Command{
-	Use:   "rm [tunnelName]",
-	Short: "Dynamically stop and remove a tunnel mapping",
-	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		tunnelName := args[0]
-		save, _ := cmd.Flags().GetBool("save")
+// targetKind is how an rm argument addresses tunnels.
+type targetKind int
 
-		cli := daemon.NewClient()
-		if err := cli.Remove(tunnelName); err != nil {
-			fmt.Printf("Failed to remove tunnel: %v\n", err)
-			return
+const (
+	targetLocalPort targetKind = iota // "1234": the tunnel bound to a local port
+	targetServer                      // "gpu-server": every tunnel of a server alias
+	targetName                        // "gpu-server-1234:80": legacy full name
+)
+
+// classifyTarget decides the addressing mode of an rm argument. Numeric args
+// are always ports (even out-of-range ones, so the user gets a port error
+// rather than a confusing server lookup failure).
+func classifyTarget(arg string) targetKind {
+	if _, err := strconv.Atoi(arg); err == nil {
+		return targetLocalPort
+	}
+	if strings.Contains(arg, ":") {
+		return targetName
+	}
+	return targetServer
+}
+
+func parseLocalPort(arg string) (int, error) {
+	port, err := strconv.Atoi(arg)
+	if err != nil || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("invalid local port %q", arg)
+	}
+	return port, nil
+}
+
+func removeTarget(cli *daemon.Client, arg string) ([]config.ResolvedTunnel, error) {
+	switch classifyTarget(arg) {
+	case targetLocalPort:
+		port, err := parseLocalPort(arg)
+		if err != nil {
+			return nil, err
 		}
-		fmt.Println("Successfully removed tunnel.")
+		return cli.RemoveByLocalPort(port)
+	case targetName:
+		return cli.Remove(arg)
+	default:
+		return cli.RemoveByServer(arg)
+	}
+}
 
-		if save {
-			// Try to parse server and mapping from tunnel name (format: server-local:remote)
-			// This is an approximate heuristic as requested in plan
-			dashIdx := strings.LastIndex(tunnelName, "-")
-			if dashIdx == -1 {
-				fmt.Println("Warning: Could not parse tunnel name for persistence. Use manual config edit or exact name.")
-				return
-			}
-			server := tunnelName[:dashIdx]
-			portMapping := tunnelName[dashIdx+1:]
+// persistRemovals drops the removed tunnels from the config file using the
+// authoritative metadata returned by the daemon.
+func persistRemovals(cmd *cobra.Command, removed []config.ResolvedTunnel) {
+	cfgFile, _ := cmd.Flags().GetString("config")
+	if cfgFile == "" {
+		cfgFile = "config.yaml"
+	}
+	cfg, err := config.LoadConfig(cfgFile)
+	if err != nil {
+		fmt.Printf("Warning: tunnels removed but failed to load config for saving: %v\n", err)
+		return
+	}
 
-			cfgFile, _ := cmd.Flags().GetString("config")
-			if cfgFile == "" {
-				cfgFile = "config.yaml"
+	changed := false
+	for _, rt := range removed {
+		server := rt.Server
+		if server == "" {
+			// tunnel predates the Server field; fall back to name parsing
+			if idx := strings.LastIndex(rt.Name, "-"); idx != -1 {
+				server = rt.Name[:idx]
 			}
-			cfg, err := config.LoadConfig(cfgFile)
+		}
+		if server == "" {
+			fmt.Printf("Warning: cannot determine server for %s; edit %s manually\n", rt.Name, cfgFile)
+			continue
+		}
+		if config.RemoveTunnelTargetFromConfig(cfg, server, rt.PortMapping()) {
+			changed = true
+		} else {
+			fmt.Printf("Note: %s not found in %s (already gone or part of a range)\n", rt.Name, cfgFile)
+		}
+	}
+	if !changed {
+		return
+	}
+	if err := config.SaveConfig(cfgFile, cfg); err != nil {
+		fmt.Printf("Error: failed to save config to %s: %v\n", cfgFile, err)
+		return
+	}
+	fmt.Printf("Changes persisted to %s\n", cfgFile)
+}
+
+// rmCompletions asks the running daemon for active tunnels and offers their
+// local ports (primary) and server aliases (bulk removal) as candidates.
+func rmCompletions(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	tunnels, err := daemon.NewClient().List()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	used := make(map[string]bool, len(args))
+	for _, a := range args {
+		used[a] = true
+	}
+
+	var comps []string
+	serverCounts := make(map[string]int)
+	var serverOrder []string
+	for _, rt := range tunnels {
+		if rt.LocalPort > 0 {
+			port := strconv.Itoa(rt.LocalPort)
+			if !used[port] {
+				comps = append(comps, fmt.Sprintf("%s\t%s:%d", port, rt.Server, rt.RemotePort))
+			}
+		} else if rt.Name != "" && !used[rt.Name] {
+			comps = append(comps, rt.Name)
+		}
+		if rt.Server != "" {
+			if serverCounts[rt.Server] == 0 {
+				serverOrder = append(serverOrder, rt.Server)
+			}
+			serverCounts[rt.Server]++
+		}
+	}
+	for _, server := range serverOrder {
+		if !used[server] {
+			comps = append(comps, fmt.Sprintf("%s\tall %d tunnel(s)", server, serverCounts[server]))
+		}
+	}
+	return comps, cobra.ShellCompDirectiveNoFileComp
+}
+
+var rmCmd = &cobra.Command{
+	Use:   "rm [localPort|serverAlias|tunnelName]...",
+	Short: "Dynamically stop and remove tunnel mappings",
+	Long: `Remove active tunnels. Each target may be:
+  - a local port (e.g. "1234"), the primary form: local ports are unique
+  - a server alias (e.g. "gpu-server") to remove all of its tunnels
+  - a full tunnel name (e.g. "gpu-server-1234:80"), the legacy form`,
+	Args:              cobra.MinimumNArgs(1),
+	ValidArgsFunction: rmCompletions,
+	Run: func(cmd *cobra.Command, args []string) {
+		save, _ := cmd.Flags().GetBool("save")
+		cli := daemon.NewClient()
+
+		var removed []config.ResolvedTunnel
+		failed := false
+		for _, arg := range args {
+			batch, err := removeTarget(cli, arg)
 			if err != nil {
-				fmt.Printf("Warning: Removed tunnel but failed to load config for saving: %v\n", err)
-				return
+				fmt.Printf("Failed to remove %q: %v\n", arg, err)
+				failed = true
+				continue
 			}
-			if config.RemoveTunnelTargetFromConfig(cfg, server, portMapping) {
-				if err := config.SaveConfig(cfgFile, cfg); err != nil {
-					fmt.Printf("Error: Failed to save config to %s: %v\n", cfgFile, err)
-				} else {
-					fmt.Printf("Changes persisted to %s\n", cfgFile)
+			for _, rt := range batch {
+				server := rt.Server
+				if server == "" {
+					server = rt.Name
 				}
-			} else {
-				fmt.Println("Note: Tunnel was removed from memory but not found in config file (maybe already gone or range discrepancy).")
+				fmt.Printf("Removed %s:%d (local %d)\n", server, rt.RemotePort, rt.LocalPort)
 			}
+			removed = append(removed, batch...)
+		}
+
+		if save && len(removed) > 0 {
+			persistRemovals(cmd, removed)
+		}
+		if failed {
+			os.Exit(1)
 		}
 	},
 }

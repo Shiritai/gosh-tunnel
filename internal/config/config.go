@@ -54,9 +54,12 @@ type ConfigFile struct {
 	Tunnels       []TunnelConfig `yaml:"tunnels"`
 }
 
-// ResolvedTunnel represents a single port mapping after expanding port ranges
+// ResolvedTunnel represents a single port mapping after expanding port ranges.
+// Server keeps the user-facing alias so callers never have to parse it back
+// out of Name.
 type ResolvedTunnel struct {
 	Name         string
+	Server       string
 	HostName     string
 	Port         string
 	User         string
@@ -65,6 +68,11 @@ type ResolvedTunnel struct {
 	LocalPort    int
 	RemoteHost   string
 	RemotePort   int
+}
+
+// PortMapping returns the "local:remote" string used in config files.
+func (t ResolvedTunnel) PortMapping() string {
+	return fmt.Sprintf("%d:%d", t.LocalPort, t.RemotePort)
 }
 
 // ExpandProxyCommandTokens expands OpenSSH ProxyCommand tokens (%h, %p, %r, %%).
@@ -190,6 +198,7 @@ func ResolveTunnels(cfg *ConfigFile) ([]ResolvedTunnel, error) {
 			for _, m := range mappings {
 				resolved = append(resolved, ResolvedTunnel{
 					Name:         fmt.Sprintf("%s-%d:%d", t.Server, m.local, m.remote),
+					Server:       t.Server,
 					HostName:     hostName,
 					Port:         port,
 					User:         user,

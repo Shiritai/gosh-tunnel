@@ -97,7 +97,7 @@ func TestRealWorldScenario(t *testing.T) {
 
 	// 5. User Hot-Reload Operation: "Remove home ports and add a new temporary DB port"
 	for i := 0; i <= 2; i++ {
-		if err := cli.Remove(fmt.Sprintf("workstation-%d", basePortHome+i)); err != nil {
+		if _, err := cli.Remove(fmt.Sprintf("workstation-%d", basePortHome+i)); err != nil {
 			t.Errorf("Failed to remove home port %d: %v", basePortHome+i, err)
 		}
 	}

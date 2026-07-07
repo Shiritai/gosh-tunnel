@@ -45,15 +45,31 @@ func (c *Client) Add(tunnel config.ResolvedTunnel) error {
 	return nil
 }
 
-func (c *Client) Remove(name string) error {
-	res, err := c.sendRequest(Request{Command: "rm", Name: name})
+func (c *Client) remove(req Request) ([]config.ResolvedTunnel, error) {
+	res, err := c.sendRequest(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !res.Success {
-		return fmt.Errorf("%s", res.Message)
+		return nil, fmt.Errorf("%s", res.Message)
 	}
-	return nil
+	return res.Removed, nil
+}
+
+// Remove tears down a tunnel by its full name (legacy addressing) and returns
+// the removed tunnel's metadata.
+func (c *Client) Remove(name string) ([]config.ResolvedTunnel, error) {
+	return c.remove(Request{Command: "rm", Name: name})
+}
+
+// RemoveByLocalPort tears down the tunnel bound to the given local port.
+func (c *Client) RemoveByLocalPort(port int) ([]config.ResolvedTunnel, error) {
+	return c.remove(Request{Command: "rm", LocalPort: port})
+}
+
+// RemoveByServer tears down every tunnel belonging to a server alias.
+func (c *Client) RemoveByServer(server string) ([]config.ResolvedTunnel, error) {
+	return c.remove(Request{Command: "rm", Server: server})
 }
 
 func (c *Client) Status() ([]string, error) {
@@ -65,4 +81,24 @@ func (c *Client) Status() ([]string, error) {
 		return nil, fmt.Errorf("%s", res.Message)
 	}
 	return res.Tunnels, nil
+}
+
+// List returns structured metadata for active tunnels. When talking to a
+// daemon that predates structured status it degrades to name-only entries.
+func (c *Client) List() ([]config.ResolvedTunnel, error) {
+	res, err := c.sendRequest(Request{Command: "status"})
+	if err != nil {
+		return nil, err
+	}
+	if !res.Success {
+		return nil, fmt.Errorf("%s", res.Message)
+	}
+	if res.Details == nil && len(res.Tunnels) > 0 {
+		details := make([]config.ResolvedTunnel, 0, len(res.Tunnels))
+		for _, name := range res.Tunnels {
+			details = append(details, config.ResolvedTunnel{Name: name})
+		}
+		return details, nil
+	}
+	return res.Details, nil
 }

@@ -65,15 +65,85 @@ func TestDaemonIPCAddRemoveFlow(t *testing.T) {
 	}
 
 	// 6. Test Remove
-	err = cli.Remove("test-tunnel-8080")
+	removed, err := cli.Remove("test-tunnel-8080")
 	if err != nil {
 		t.Errorf("Remove failed: %v", err)
+	}
+	if len(removed) != 1 || removed[0].Name != "test-tunnel-8080" {
+		t.Errorf("Expected removed tunnel metadata, got: %+v", removed)
 	}
 
 	// 7. Verify removed
 	status, _ = cli.Status()
 	if len(status) != 0 {
 		t.Errorf("Expected tunnel to be removed, got: %v", status)
+	}
+}
+
+// TestDaemonIPCRemoveByPortAndServer exercises the local-port and server-alias
+// addressing modes of rm, plus the structured status listing.
+func TestDaemonIPCRemoveByPortAndServer(t *testing.T) {
+	mgr := tunnel.NewManager()
+
+	testSocket := fmt.Sprintf("/tmp/gosh-rmmode-%d.sock", time.Now().UnixNano())
+	daemon.SocketPath = testSocket
+	defer os.Remove(testSocket)
+
+	srv := daemon.NewServer(mgr)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Failed to start daemon: %v", err)
+	}
+	defer srv.Stop()
+
+	cli := daemon.NewClient()
+	for _, rt := range []config.ResolvedTunnel{
+		{Name: "alpha-25901:80", Server: "alpha", HostName: "127.0.0.1", Port: "22", LocalPort: 25901, RemotePort: 80},
+		{Name: "alpha-25902:81", Server: "alpha", HostName: "127.0.0.1", Port: "22", LocalPort: 25902, RemotePort: 81},
+		{Name: "beta-25903:90", Server: "beta", HostName: "127.0.0.1", Port: "22", LocalPort: 25903, RemotePort: 90},
+	} {
+		if err := cli.Add(rt); err != nil {
+			t.Fatalf("Add %s failed: %v", rt.Name, err)
+		}
+	}
+
+	// Structured status carries local port and server alias
+	details, err := cli.List()
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(details) != 3 {
+		t.Fatalf("Expected 3 tunnels in list, got %d: %+v", len(details), details)
+	}
+	if details[0].Server != "alpha" || details[0].LocalPort != 25901 {
+		t.Errorf("List not sorted or missing fields: %+v", details[0])
+	}
+
+	// Remove by local port
+	removed, err := cli.RemoveByLocalPort(25901)
+	if err != nil {
+		t.Fatalf("RemoveByLocalPort failed: %v", err)
+	}
+	if len(removed) != 1 || removed[0].Server != "alpha" || removed[0].RemotePort != 80 {
+		t.Errorf("RemoveByLocalPort returned wrong metadata: %+v", removed)
+	}
+
+	// Remove by unknown local port fails
+	if _, err := cli.RemoveByLocalPort(25999); err == nil {
+		t.Error("Expected error removing unknown local port, got nil")
+	}
+
+	// Remove by server alias removes the rest of alpha
+	removed, err = cli.RemoveByServer("alpha")
+	if err != nil {
+		t.Fatalf("RemoveByServer failed: %v", err)
+	}
+	if len(removed) != 1 || removed[0].LocalPort != 25902 {
+		t.Errorf("RemoveByServer returned wrong metadata: %+v", removed)
+	}
+
+	status, _ := cli.Status()
+	if len(status) != 1 || status[0] != "beta-25903:90" {
+		t.Errorf("Expected only beta left, got %v", status)
 	}
 }
 
@@ -118,7 +188,7 @@ func TestDaemonIPCFuzz(t *testing.T) {
 					})
 				} else {
 					// Remove
-					_ = cli.Remove(name)
+					_, _ = cli.Remove(name)
 				}
 				// Occasionally check status just to spam the socket
 				if rand.Float32() < 0.1 {
